@@ -198,6 +198,7 @@ EXCEPTION
         RETURN 'ERRO: FALHA AO CADASTRAR COMPOSIÇÃO. ' || SQLERRM;
 END;
 $$ LANGUAGE PLPGSQL;
+
 -- ==================================================
 --   ========== FUNÇÕES DE ATUALIZAÇÃO ================
 -- ==================================================
@@ -402,24 +403,30 @@ DECLARE
     V_MENSAGEM TEXT;
     V_ID_PRODUTO INT;
 BEGIN
+    -- Valida cliente
     IF NOT EXISTS (SELECT 1 FROM CLIENTE WHERE ID_CLIENTE = P_ID_CLIENTE AND ATIVO = TRUE) THEN
         RETURN 'ERRO: CLIENTE INEXISTENTE OU INATIVO.';
     END IF;
 
+    -- Valida funcionário
     IF NOT EXISTS (SELECT 1 FROM FUNCIONARIO WHERE ID_FUNCIONARIO = P_ID_FUNCIONARIO) THEN
         RETURN 'ERRO: FUNCIONÁRIO NÃO ENCONTRADO.';
     END IF;
 
+    -- Valida produtos, calcula total e monta se necessário
     FOR V_ITEM IN SELECT * FROM JSONB_ARRAY_ELEMENTS(P_ITEMS)
     LOOP
         V_ID_PRODUTO := (V_ITEM->>'ID_PRODUTO')::INT;
         V_QUANTIDADE := (V_ITEM->>'QUANTIDADE')::INT;
 
+        -- Verifica se o produto é válido e ativo
         IF NOT EXISTS (SELECT 1 FROM PRODUTO WHERE ID_PRODUTO = V_ID_PRODUTO AND ATIVO = TRUE) THEN
             RETURN 'ERRO: PRODUTO ' || V_ID_PRODUTO || ' INEXISTENTE OU INATIVO.';
         END IF;
 
+        -- Se for composto
         IF EXISTS (SELECT 1 FROM COMPOSICAO_PRONTA WHERE ID_PROD_COMP1 = V_ID_PRODUTO AND ATIVO = TRUE) THEN
+            -- Tenta montar se necessário
             IF NOT VERIFICAR_ESTOQUE_COMPOSICAO_RECURSIVO(V_ID_PRODUTO, V_QUANTIDADE) THEN
                 V_MENSAGEM := MONTAR_PRODUTO_COMPOSTO(V_ID_PRODUTO, V_QUANTIDADE);
                 IF V_MENSAGEM NOT LIKE 'SUCESSO%' THEN
@@ -427,26 +434,32 @@ BEGIN
                 END IF;
             END IF;
         ELSE
+            -- Produto simples
             IF (SELECT ESTOQUE FROM PRODUTO WHERE ID_PRODUTO = V_ID_PRODUTO) < V_QUANTIDADE THEN
                 RETURN 'ERRO: ESTOQUE INSUFICIENTE PARA O PRODUTO ' || V_ID_PRODUTO;
             END IF;
         END IF;
 
+        -- Consulta preço e acumula total
         SELECT PRECO INTO V_PRECO FROM PRODUTO WHERE ID_PRODUTO = V_ID_PRODUTO;
         V_TOTAL_PEDIDO := V_TOTAL_PEDIDO + (V_PRECO * V_QUANTIDADE);
     END LOOP;
 
+    -- Insere o pedido
     INSERT INTO PEDIDO (ID_PEDIDO, ID_CLIENTE, TELEFONE, TOTAL, ID_FUNCIONARIO)
     VALUES (P_ID_PEDIDO, P_ID_CLIENTE, P_TELEFONE, V_TOTAL_PEDIDO, P_ID_FUNCIONARIO);
 
+    -- Insere os itens com valor unitário (aciona a trigger corretamente)
     FOR V_ITEM IN SELECT * FROM JSONB_ARRAY_ELEMENTS(P_ITEMS)
     LOOP
-        INSERT INTO ITEM_PEDIDO (ID_PEDIDO, ID_PRODUTO, QUANT)
-        VALUES (
-            P_ID_PEDIDO,
-            (V_ITEM->>'ID_PRODUTO')::INT,
-            (V_ITEM->>'QUANTIDADE')::INT
-        );
+        V_ID_PRODUTO := (V_ITEM->>'ID_PRODUTO')::INT;
+        V_QUANTIDADE := (V_ITEM->>'QUANTIDADE')::INT;
+
+        SELECT PRECO INTO V_PRECO FROM PRODUTO WHERE ID_PRODUTO = V_ID_PRODUTO;
+
+        INSERT INTO ITEM_PEDIDO (ID_PEDIDO, ID_PRODUTO, QUANT, VALOR_UNITARIO)
+        VALUES (P_ID_PEDIDO, V_ID_PRODUTO, V_QUANTIDADE, V_PRECO);
+        -- AQUI a trigger TRG_PROCESSAR_PEDIDO_COMPOSTO é ativada automaticamente
     END LOOP;
 
     RETURN 'PEDIDO REGISTRADO COM SUCESSO. TOTAL: R$ ' || V_TOTAL_PEDIDO;
